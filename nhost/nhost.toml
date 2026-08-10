@@ -1,0 +1,15 @@
+[global]
+subdomain = "local"
+
+[hasura]
+version = "v2.38.0"
+jwt_secret = { type = "HS256", key = "nhost-secret-jwt-key-for-hasura-local-development" }
+
+[postgres]
+version = "15"
+
+[auth]
+redirection = { client_url = "http://localhost:3000" }
+
+[functions]
+node = "20"

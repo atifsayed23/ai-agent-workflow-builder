@@ -1,0 +1,83 @@
+# Hasura Layer 1 & Layer 2 Permission Rules
+
+# Layer 1: Org & Role Scoping
+# Every table is scoped to caller's X-Hasura-Org-Id from org_members lookup.
+# Roles: owner, editor, viewer.
+
+permissions:
+  workflows:
+    select:
+      - role: owner
+        filter: { org_id: { _eq: "X-Hasura-Org-Id" } }
+      - role: editor
+        filter: { org_id: { _eq: "X-Hasura-Org-Id" } }
+      - role: viewer
+        filter: { org_id: { _eq: "X-Hasura-Org-Id" } }
+
+    insert:
+      - role: owner
+        check: { org_id: { _eq: "X-Hasura-Org-Id" } }
+      - role: editor
+        check: { org_id: { _eq: "X-Hasura-Org-Id" } }
+      # Viewer role cannot insert (read-only)
+
+    update:
+      - role: owner
+        filter: { org_id: { _eq: "X-Hasura-Org-Id" } }
+      - role: editor
+        filter: { org_id: { _eq: "X-Hasura-Org-Id" } }
+
+    delete:
+      - role: owner
+        filter: { org_id: { _eq: "X-Hasura-Org-Id" } }
+
+  workflow_steps:
+    select:
+      - role: owner
+        filter: { workflow: { org_id: { _eq: "X-Hasura-Org-Id" } } }
+      - role: editor
+        filter: { workflow: { org_id: { _eq: "X-Hasura-Org-Id" } } }
+      - role: viewer
+        filter: { workflow: { org_id: { _eq: "X-Hasura-Org-Id" } } }
+
+    # Layer 2 Step Gating: High-privilege steps (db_write, notify, webhook trigger) require 'owner' role.
+    insert:
+      - role: owner
+        check: { workflow: { org_id: { _eq: "X-Hasura-Org-Id" } } }
+      - role: editor
+        # Editors can insert standard steps (llm_call, http_request, conditional_branch, approval_gate)
+        # but NOT high-privilege steps (db_write, notify)
+        check: 
+          _and:
+            - { workflow: { org_id: { _eq: "X-Hasura-Org-Id" } } }
+            - { type: { _nin: ["db_write", "notify"] } }
+
+  workflow_runs:
+    select:
+      - role: owner
+        filter: { org_id: { _eq: "X-Hasura-Org-Id" } }
+      - role: editor
+        filter: { org_id: { _eq: "X-Hasura-Org-Id" } }
+      - role: viewer
+        filter: { org_id: { _eq: "X-Hasura-Org-Id" } }
+
+  step_runs:
+    select:
+      - role: owner
+        filter: { workflow_run: { org_id: { _eq: "X-Hasura-Org-Id" } } }
+      - role: editor
+        filter: { workflow_run: { org_id: { _eq: "X-Hasura-Org-Id" } } }
+      - role: viewer
+        filter: { workflow_run: { org_id: { _eq: "X-Hasura-Org-Id" } } }
+
+  org_members:
+    select:
+      - role: owner
+        filter: { org_id: { _eq: "X-Hasura-Org-Id" } }
+      - role: editor
+        filter: { org_id: { _eq: "X-Hasura-Org-Id" } }
+      - role: viewer
+        filter: { org_id: { _eq: "X-Hasura-Org-Id" } }
+    insert:
+      - role: owner
+        check: { org_id: { _eq: "X-Hasura-Org-Id" } }

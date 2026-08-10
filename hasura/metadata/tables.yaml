@@ -1,0 +1,110 @@
+- table:
+    schema: public
+    name: organizations
+  object_relationships: []
+  array_relationships:
+    - name: members
+      using:
+        foreign_key_constraint_on:
+          column: org_id
+          table:
+            schema: public
+            name: org_members
+    - name: workflows
+      using:
+        foreign_key_constraint_on:
+          column: org_id
+          table:
+            schema: public
+            name: workflows
+    - name: workflow_runs
+      using:
+        foreign_key_constraint_on:
+          column: org_id
+          table:
+            schema: public
+            name: workflow_runs
+
+- table:
+    schema: public
+    name: org_members
+  object_relationships:
+    - name: organization
+      using:
+        foreign_key_constraint_on: org_id
+
+- table:
+    schema: public
+    name: workflows
+  object_relationships:
+    - name: organization
+      using:
+        foreign_key_constraint_on: org_id
+  array_relationships:
+    - name: steps
+      using:
+        foreign_key_constraint_on:
+          column: workflow_id
+          table:
+            schema: public
+            name: workflow_steps
+    - name: triggers
+      using:
+        foreign_key_constraint_on:
+          column: workflow_id
+          table:
+            schema: public
+            name: workflow_triggers
+    - name: runs
+      using:
+        foreign_key_constraint_on:
+          column: workflow_id
+          table:
+            schema: public
+            name: workflow_runs
+
+- table:
+    schema: public
+    name: workflow_steps
+  object_relationships:
+    - name: workflow
+      using:
+        foreign_key_constraint_on: workflow_id
+
+- table:
+    schema: public
+    name: workflow_triggers
+  object_relationships:
+    - name: workflow
+      using:
+        foreign_key_constraint_on: workflow_id
+
+- table:
+    schema: public
+    name: workflow_runs
+  object_relationships:
+    - name: organization
+      using:
+        foreign_key_constraint_on: org_id
+    - name: workflow
+      using:
+        foreign_key_constraint_on: workflow_id
+  array_relationships:
+    - name: step_runs
+      using:
+        foreign_key_constraint_on:
+          column: workflow_run_id
+          table:
+            schema: public
+            name: step_runs
+
+- table:
+    schema: public
+    name: step_runs
+  object_relationships:
+    - name: workflow_run
+      using:
+        foreign_key_constraint_on: workflow_run_id
+    - name: step
+      using:
+        foreign_key_constraint_on: step_id

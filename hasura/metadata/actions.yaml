@@ -1,0 +1,59 @@
+# Hasura Actions Definition for Workflow Orchestration & Step Approval
+
+actions:
+  - name: triggerWorkflowRun
+    definition:
+      kind: synchronous
+      handler: "{{ACTION_BASE_URL}}/api/actions/trigger-workflow"
+      forward_client_headers: true
+      headers:
+        - name: Content-Type
+          value: application/json
+    permissions:
+      - role: owner
+      - role: editor
+
+  - name: approveStep
+    definition:
+      kind: synchronous
+      handler: "{{ACTION_BASE_URL}}/api/actions/approve-step"
+      forward_client_headers: true
+      headers:
+        - name: Content-Type
+          value: application/json
+    permissions:
+      - role: owner
+      - role: editor
+
+custom_types:
+  enums: []
+  input_objects:
+    - name: TriggerWorkflowInput
+      fields:
+        - name: workflow_id
+          type: uuid!
+        - name: payload
+          type: json
+    - name: ApproveStepInput
+      fields:
+        - name: step_run_id
+          type: uuid!
+        - name: decision
+          type: String! # 'approve' or 'reject'
+  objects:
+    - name: WorkflowRunOutput
+      fields:
+        - name: run_id
+          type: uuid!
+        - name: status
+          type: String!
+        - name: message
+          type: String
+    - name: ApproveStepOutput
+      fields:
+        - name: step_run_id
+          type: uuid!
+        - name: status
+          type: String!
+        - name: message
+          type: String
