@@ -1,11 +1,9 @@
 -- Migration: 001_init_schema.sql
 -- Description: AI Agent Workflow Builder Schema with Organizations, Workflows, Step Engine, Runs, and Audit Tables
 
-CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
-
 -- 1. Organizations
 CREATE TABLE IF NOT EXISTS public.organizations (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     name TEXT NOT NULL,
     calls_used INTEGER NOT NULL DEFAULT 0,
     calls_allowed INTEGER NOT NULL DEFAULT 100,
@@ -15,7 +13,7 @@ CREATE TABLE IF NOT EXISTS public.organizations (
 
 -- 2. Org Members (Role Scoping: owner, editor, viewer)
 CREATE TABLE IF NOT EXISTS public.org_members (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     org_id UUID NOT NULL REFERENCES public.organizations(id) ON DELETE CASCADE,
     user_id UUID NOT NULL,
     user_email TEXT NOT NULL,
@@ -26,7 +24,7 @@ CREATE TABLE IF NOT EXISTS public.org_members (
 
 -- 3. Workflows
 CREATE TABLE IF NOT EXISTS public.workflows (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     org_id UUID NOT NULL REFERENCES public.organizations(id) ON DELETE CASCADE,
     name TEXT NOT NULL,
     description TEXT,
@@ -38,7 +36,7 @@ CREATE TABLE IF NOT EXISTS public.workflows (
 
 -- 4. Workflow Steps (Node Types: llm_call, http_request, db_write, notify, conditional_branch, approval_gate)
 CREATE TABLE IF NOT EXISTS public.workflow_steps (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     workflow_id UUID NOT NULL REFERENCES public.workflows(id) ON DELETE CASCADE,
     step_order INTEGER NOT NULL,
     name TEXT NOT NULL,
@@ -50,7 +48,7 @@ CREATE TABLE IF NOT EXISTS public.workflow_steps (
 
 -- 5. Workflow Triggers (Manual, Webhook, Scheduled, Database Event)
 CREATE TABLE IF NOT EXISTS public.workflow_triggers (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     workflow_id UUID NOT NULL REFERENCES public.workflows(id) ON DELETE CASCADE,
     type TEXT NOT NULL CHECK (type IN ('manual', 'webhook', 'scheduled', 'db_event')),
     config JSONB NOT NULL DEFAULT '{}'::jsonb,
@@ -59,7 +57,7 @@ CREATE TABLE IF NOT EXISTS public.workflow_triggers (
 
 -- 6. Workflow Runs
 CREATE TABLE IF NOT EXISTS public.workflow_runs (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     workflow_id UUID NOT NULL REFERENCES public.workflows(id) ON DELETE CASCADE,
     org_id UUID NOT NULL REFERENCES public.organizations(id) ON DELETE CASCADE,
     triggered_by UUID,
@@ -75,7 +73,7 @@ CREATE TABLE IF NOT EXISTS public.workflow_runs (
 
 -- 7. Step Runs
 CREATE TABLE IF NOT EXISTS public.step_runs (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     workflow_run_id UUID NOT NULL REFERENCES public.workflow_runs(id) ON DELETE CASCADE,
     step_id UUID NOT NULL REFERENCES public.workflow_steps(id) ON DELETE CASCADE,
     step_name TEXT NOT NULL,
@@ -93,7 +91,7 @@ CREATE TABLE IF NOT EXISTS public.step_runs (
 
 -- 8. Custom Table for db_write step outputs
 CREATE TABLE IF NOT EXISTS public.db_write_records (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     org_id UUID NOT NULL REFERENCES public.organizations(id) ON DELETE CASCADE,
     workflow_run_id UUID REFERENCES public.workflow_runs(id) ON DELETE SET NULL,
     entity_type TEXT NOT NULL DEFAULT 'workflow_result',
@@ -103,7 +101,7 @@ CREATE TABLE IF NOT EXISTS public.db_write_records (
 
 -- 9. Notifications Audit Log for notify step
 CREATE TABLE IF NOT EXISTS public.notifications_log (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     org_id UUID NOT NULL REFERENCES public.organizations(id) ON DELETE CASCADE,
     workflow_run_id UUID REFERENCES public.workflow_runs(id) ON DELETE SET NULL,
     recipient TEXT NOT NULL,

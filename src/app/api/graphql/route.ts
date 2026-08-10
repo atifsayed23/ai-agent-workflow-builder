@@ -1,110 +1,95 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { dbStore } from '@/lib/db-store';
-import { triggerWorkflowRun, approveStepRun } from '@/lib/workflow-runner';
-import { UserSession, OrgRole, StepType, WorkflowStep } from '@/lib/types';
+import {
+  getPgEngine,
+  verifyAuthoritativeOrgMember,
+  checkLayer2StepCreation,
+  getWorkflowsByOrg,
+  getWorkflowById,
+  getWorkflowRunById
+} from '@/lib/postgres-store';
+import { triggerWorkflowRun, approveStepRun, subscribeToRuns } from '@/lib/workflow-runner';
+import { UserSession, OrgRole, StepType } from '@/lib/types';
 import { v4 as uuidv4 } from 'uuid';
 
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
+    const db = await getPgEngine();
 
-    // Hasura Session Headers
-    const hasuraOrgId = req.headers.get('x-hasura-org-id') || '11111111-1111-4111-a111-111111111111';
-    const hasuraUserId = req.headers.get('x-hasura-user-id') || 'user-default-id';
-    const hasuraRole = (req.headers.get('x-hasura-org-role') || 'owner') as OrgRole;
-    const userEmail = req.headers.get('x-hasura-user-email') || 'active@org.com';
+    // Extract headers passed by Hasura JWT / Client
+    const hasuraUserId = req.headers.get('x-hasura-user-id') || body.session_variables?.['x-hasura-user-id'] || 'aaaa1111-1111-4111-a111-111111111111';
+    const hasuraOrgId = req.headers.get('x-hasura-org-id') || body.session_variables?.['x-hasura-org-id'] || '11111111-1111-4111-a111-111111111111';
+    const userEmail = req.headers.get('x-hasura-user-email') || body.input?.user_email || 'owner@acme.com';
+
+    // Authoritative Layer 1 Security Lookup in PostgreSQL org_members table
+    const memberCheck = await verifyAuthoritativeOrgMember(hasuraUserId, hasuraOrgId);
 
     const session: UserSession = {
       user_id: hasuraUserId,
       user_email: userEmail,
       org_id: hasuraOrgId,
-      role: hasuraRole,
+      role: memberCheck.isMember ? memberCheck.role! : 'viewer',
     };
 
     const { query, variables } = body;
 
-    // --- 1. Workflow Query ---
+    // --- 1. Workflow Query over PostgreSQL ---
     if (query?.includes('GetOrgWorkflows') || query?.includes('workflows(') || query?.includes('query Workflows')) {
       const targetOrgId = variables?.org_id || session.org_id;
 
-      // Layer 1 Security Check
-      if (!dbStore.checkLayer1Select(session, targetOrgId)) {
+      // Authoritative Layer 1 Security Check in org_members table
+      const targetMemberCheck = await verifyAuthoritativeOrgMember(session.user_id, targetOrgId);
+      if (!targetMemberCheck.isMember) {
         return NextResponse.json({
           data: { workflows: [] },
-          errors: [{ message: `Layer 1 RLS Permission Denied: User in Org '${session.org_id}' cannot read workflows of Org '${targetOrgId}'.` }],
+          errors: [{ message: `Layer 1 RLS Permission Denied: User '${session.user_id}' is not a verified member of Org '${targetOrgId}' in org_members table.` }],
         });
       }
 
-      const orgWorkflows = Array.from(dbStore.workflows.values())
-        .filter((w) => w.org_id === targetOrgId)
-        .map((w) => {
-          const steps = Array.from(dbStore.workflowSteps.values())
-            .filter((s) => s.workflow_id === w.id)
-            .sort((a, b) => a.step_order - b.step_order);
-
-          const triggers = Array.from(dbStore.workflowTriggers.values())
-            .filter((t) => t.workflow_id === w.id);
-
-          const runs = Array.from(dbStore.workflowRuns.values())
-            .filter((r) => r.workflow_id === w.id)
-            .map((r) => dbStore.getWorkflowRunById(r.id)!);
-
-          return {
-            ...w,
-            steps,
-            triggers,
-            runs,
-            most_recent_run: runs.length > 0 ? runs[runs.length - 1] : null,
-          };
-        });
-
+      const orgWorkflows = await getWorkflowsByOrg(targetOrgId);
       return NextResponse.json({ data: { workflows: orgWorkflows } });
     }
 
     // --- 2. Single Workflow Query ---
     if (query?.includes('GetWorkflowById') || query?.includes('workflow_by_pk')) {
       const wfId = variables?.id;
-      const wf = dbStore.workflows.get(wfId);
+      const wf = await getWorkflowById(wfId);
 
-      if (!wf || !dbStore.checkLayer1Select(session, wf.org_id)) {
+      if (!wf) {
         return NextResponse.json({
           data: { workflow_by_pk: null },
-          errors: [{ message: `Layer 1 RLS Access Denied: Workflow ID '${wfId}' not found or belongs to another organization.` }],
+          errors: [{ message: `Workflow ID '${wfId}' not found in PostgreSQL.` }],
         });
       }
 
-      const steps = Array.from(dbStore.workflowSteps.values())
-        .filter((s) => s.workflow_id === wf.id)
-        .sort((a, b) => a.step_order - b.step_order);
+      // Authoritative Layer 1 Check
+      const targetMemberCheck = await verifyAuthoritativeOrgMember(session.user_id, wf.org_id);
+      if (!targetMemberCheck.isMember) {
+        return NextResponse.json({
+          data: { workflow_by_pk: null },
+          errors: [{ message: `Layer 1 RLS Access Denied: User '${session.user_id}' is not in Org '${wf.org_id}' org_members.` }],
+        });
+      }
 
-      const triggers = Array.from(dbStore.workflowTriggers.values()).filter((t) => t.workflow_id === wf.id);
-
-      return NextResponse.json({
-        data: {
-          workflow_by_pk: {
-            ...wf,
-            steps,
-            triggers,
-          },
-        },
-      });
+      return NextResponse.json({ data: { workflow_by_pk: wf } });
     }
 
-    // --- 3. Mutation: Create/Edit Workflow ---
+    // --- 3. Mutation: Create/Edit Workflow in PostgreSQL ---
     if (query?.includes('CreateWorkflow') || query?.includes('insert_workflows_one') || query?.includes('SaveWorkflow')) {
       const { name, description, org_id, steps } = variables;
       const targetOrg = org_id || session.org_id;
 
-      if (!dbStore.checkLayer1Mutation(session, targetOrg, ['owner', 'editor'])) {
+      const targetMemberCheck = await verifyAuthoritativeOrgMember(session.user_id, targetOrg);
+      if (!targetMemberCheck.isMember || (targetMemberCheck.role !== 'owner' && targetMemberCheck.role !== 'editor')) {
         return NextResponse.json({
-          errors: [{ message: `Layer 1 Role Failure: Role '${session.role}' cannot create/edit workflows in Org '${targetOrg}'.` }],
+          errors: [{ message: `Layer 1 Role Failure: User role '${targetMemberCheck.role}' cannot create/edit workflows in Org '${targetOrg}'.` }],
         }, { status: 403 });
       }
 
       // Layer 2 Step Gating Check
       if (steps && Array.isArray(steps)) {
         for (const s of steps) {
-          const stepGate = dbStore.checkLayer2StepCreation(session.role, s.type as StepType);
+          const stepGate = checkLayer2StepCreation(targetMemberCheck.role, s.type as StepType);
           if (!stepGate.allowed) {
             return NextResponse.json({
               errors: [{ message: stepGate.reason }],
@@ -113,65 +98,59 @@ export async function POST(req: NextRequest) {
         }
       }
 
-      const newWf: Workflow = {
-        id: variables.id || uuidv4(),
-        org_id: targetOrg,
-        name: name || 'New AI Workflow',
-        description: description || 'Custom agent chain',
-        is_active: true,
-        created_by: session.user_id,
-        created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-      };
+      const wfId = variables.id || uuidv4();
+      const now = new Date().toISOString();
 
-      dbStore.workflows.set(newWf.id, newWf);
+      await queryExec(
+        db,
+        `INSERT INTO public.workflows (id, org_id, name, description, is_active, created_by, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, true, $5, $6, $6);`,
+        [wfId, targetOrg, name || 'New AI Workflow', description || 'Custom agent chain', session.user_id, now]
+      );
 
       if (steps && Array.isArray(steps)) {
-        steps.forEach((s, idx) => {
-          const stepObj: WorkflowStep = {
-            id: s.id || uuidv4(),
-            workflow_id: newWf.id,
-            step_order: idx + 1,
-            name: s.name || `Step ${idx + 1}`,
-            type: s.type,
-            config: s.config || {},
-            created_at: new Date().toISOString(),
-          };
-          dbStore.workflowSteps.set(stepObj.id, stepObj);
-        });
+        for (let idx = 0; idx < steps.length; idx++) {
+          const s = steps[idx];
+          await queryExec(
+            db,
+            `INSERT INTO public.workflow_steps (id, workflow_id, step_order, name, type, config)
+             VALUES ($1, $2, $3, $4, $5, $6::jsonb);`,
+            [s.id || uuidv4(), wfId, idx + 1, s.name || `Step ${idx + 1}`, s.type, JSON.stringify(s.config || {})]
+          );
+        }
       }
 
-      return NextResponse.json({ data: { insert_workflows_one: newWf } });
+      const createdWf = await getWorkflowById(wfId);
+      return NextResponse.json({ data: { insert_workflows_one: createdWf } });
     }
 
-    // --- 4. Mutation: Trigger Workflow Run ---
+    // --- 4. Hasura Action: Trigger Workflow Run ---
     if (query?.includes('triggerWorkflowRun')) {
       const { workflow_id, payload } = variables;
       const res = await triggerWorkflowRun(workflow_id, session, 'manual', payload);
       return NextResponse.json({ data: { triggerWorkflowRun: res } });
     }
 
-    // --- 5. Mutation: Approve Step Run ---
+    // --- 5. Hasura Action: Approve Step Run ---
     if (query?.includes('approveStep')) {
       const { step_run_id, decision } = variables;
       const res = await approveStepRun(step_run_id, session, decision);
       return NextResponse.json({ data: { approveStep: res } });
     }
 
-    // Fallback response for unhandled queries
-    return NextResponse.json({ data: { message: 'GraphQL Query Executed' } });
+    return NextResponse.json({ data: { message: 'PostgreSQL GraphQL Query Executed' } });
   } catch (err: any) {
     return NextResponse.json({ errors: [{ message: err.message }] }, { status: 400 });
   }
 }
 
-// Live Subscription SSE Endpoint for step_runs
+// Live Subscription SSE Endpoint over PostgreSQL
 export async function GET(req: NextRequest) {
   const runId = req.nextUrl.searchParams.get('run_id');
-
   const encoder = new TextEncoder();
+
   const stream = new ReadableStream({
-    start(controller) {
+    async start(controller) {
       const sendUpdate = (run: any) => {
         if (!runId || run.id === runId) {
           const data = `data: ${JSON.stringify(run)}\n\n`;
@@ -179,13 +158,12 @@ export async function GET(req: NextRequest) {
         }
       };
 
-      // Push initial state
       if (runId) {
-        const currentRun = dbStore.getWorkflowRunById(runId);
+        const currentRun = await getWorkflowRunById(runId);
         if (currentRun) sendUpdate(currentRun);
       }
 
-      const unsubscribe = dbStore.subscribeToRuns((run) => {
+      const unsubscribe = subscribeToRuns((run) => {
         sendUpdate(run);
       });
 
@@ -202,4 +180,13 @@ export async function GET(req: NextRequest) {
       'Connection': 'keep-alive',
     },
   });
+}
+
+async function queryExec(db: any, text: string, params: any[] = []): Promise<any> {
+  if (db.query) {
+    return await db.query(text, params);
+  } else if (db.exec) {
+    return await db.exec(text, params);
+  }
+  throw new Error('Unsupported database driver');
 }

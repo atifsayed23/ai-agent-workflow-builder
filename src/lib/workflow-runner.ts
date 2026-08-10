@@ -1,5 +1,12 @@
 import { v4 as uuidv4 } from 'uuid';
-import { dbStore } from './db-store';
+import {
+  getPgEngine,
+  verifyAuthoritativeOrgMember,
+  checkLayer2ApprovalRole,
+  getWorkflowRunById,
+  getWorkflowById,
+  getOrganizationById
+} from './postgres-store';
 import { executeLlmCall } from './llm-service';
 import {
   WorkflowRun,
@@ -11,60 +18,76 @@ import {
   NotificationLog
 } from './types';
 
+// Real-time live subscription broadcast listeners
+const runSubscribers: Set<(run: WorkflowRun) => void> = new Set();
+
+export function subscribeToRuns(callback: (run: WorkflowRun) => void): () => void {
+  runSubscribers.add(callback);
+  return () => {
+    runSubscribers.delete(callback);
+  };
+}
+
+export async function broadcastRunUpdate(runId: string) {
+  const run = await getWorkflowRunById(runId);
+  if (run) {
+    runSubscribers.forEach((cb) => cb({ ...run }));
+  }
+}
+
 export async function triggerWorkflowRun(
   workflowId: string,
   session: UserSession,
   triggerType: TriggerType = 'manual',
   inputPayload: Record<string, any> = {}
 ): Promise<{ run: WorkflowRun; message: string }> {
-  // 1. Fetch Workflow & Layer 1 Permission Check
-  const workflow = dbStore.workflows.get(workflowId);
+  const db = await getPgEngine();
+
+  // 1. Fetch Workflow from PostgreSQL
+  const workflow = await getWorkflowById(workflowId);
   if (!workflow) {
     throw new Error(`Workflow not found with ID: ${workflowId}`);
   }
 
-  if (!dbStore.checkLayer1Select(session, workflow.org_id)) {
-    throw new Error(`Layer 1 Permission Denied: User in Org '${session.org_id}' cannot access workflow belonging to Org '${workflow.org_id}'.`);
+  // 2. Authoritative Layer 1 Security Check against org_members table
+  const memberCheck = await verifyAuthoritativeOrgMember(session.user_id, workflow.org_id);
+  if (!memberCheck.isMember) {
+    throw new Error(`Layer 1 RLS Violation: User '${session.user_email}' is not a verified member of Org '${workflow.org_id}' in org_members table.`);
   }
 
-  // 2. Layer 1 Role Check for triggering run (owner or editor allowed, viewer rejected)
-  if (!dbStore.checkLayer1Mutation(session, workflow.org_id, ['owner', 'editor'])) {
-    throw new Error(`Layer 1 Role Violation: Role '${session.role}' cannot trigger workflow runs. Only 'owner' or 'editor' allowed.`);
+  // 3. Layer 1 Role Check for trigger permission
+  if (memberCheck.role === 'viewer') {
+    throw new Error(`Layer 1 Role Violation: Role 'viewer' is read-only and cannot trigger workflow runs.`);
   }
 
-  // 3. Quota Enforcement Check
-  const org = dbStore.organizations.get(workflow.org_id);
+  // 4. Quota Check in PostgreSQL organizations table
+  const org = await getOrganizationById(workflow.org_id);
   if (!org) throw new Error('Organization not found');
 
   if (org.calls_used >= org.calls_allowed) {
-    throw new Error(`Quota Exceeded: Organization '${org.name}' has reached its call limit (${org.calls_used}/${org.calls_allowed} used this period).`);
+    throw new Error(`Quota Exceeded: Organization '${org.name}' has reached its call limit (${org.calls_used}/${org.calls_allowed} used).`);
   }
 
-  // 4. Create Workflow Run
+  // 5. Create Workflow Run Record in PostgreSQL
   const runId = uuidv4();
   const now = new Date().toISOString();
-  const run: WorkflowRun = {
-    id: runId,
-    workflow_id: workflowId,
-    org_id: workflow.org_id,
-    triggered_by: session.user_id,
-    trigger_type: triggerType,
-    status: 'running',
-    current_step_index: 0,
-    input_payload: inputPayload,
-    output_payload: {},
-    started_at: now,
-  };
 
-  dbStore.workflowRuns.set(run.id, run);
-  dbStore.notifySubscribers(run);
+  await queryExec(
+    db,
+    `INSERT INTO public.workflow_runs (id, workflow_id, org_id, triggered_by, trigger_type, status, current_step_index, input_payload, output_payload, started_at)
+     VALUES ($1, $2, $3, $4, $5, 'running', 0, $6::jsonb, '{}'::jsonb, $7);`,
+    [runId, workflowId, workflow.org_id, session.user_id, triggerType, JSON.stringify(inputPayload), now]
+  );
 
-  // 5. Execute Steps Asynchronously
+  await broadcastRunUpdate(runId);
+
+  // 6. Execute Steps Loop Asynchronously
   executeStepsFromIndex(runId, 0);
 
+  const createdRun = await getWorkflowRunById(runId);
   return {
-    run: dbStore.getWorkflowRunById(runId)!,
-    message: `Workflow run ${runId} started successfully.`,
+    run: createdRun!,
+    message: `Workflow run ${runId} started successfully in PostgreSQL.`,
   };
 }
 
@@ -73,169 +96,184 @@ export async function approveStepRun(
   session: UserSession,
   decision: 'approve' | 'reject' = 'approve'
 ): Promise<{ stepRun: StepRun; workflowRun: WorkflowRun; message: string }> {
-  const stepRun = dbStore.stepRuns.get(stepRunId);
-  if (!stepRun) throw new Error(`Step run not found: ${stepRunId}`);
+  const db = await getPgEngine();
 
-  const workflowRun = dbStore.workflowRuns.get(stepRun.workflow_run_id);
-  if (!workflowRun) throw new Error(`Workflow run not found: ${stepRun.workflow_run_id}`);
-
-  // Layer 1 and Layer 2 Security Verification
-  const permCheck = dbStore.checkLayer2ApprovalRole(session, stepRun, workflowRun);
-  if (!permCheck.allowed) {
-    throw new Error(permCheck.reason);
+  // Authoritative Layer 1 & Layer 2 Security Verification against org_members
+  const permCheck = await checkLayer2ApprovalRole(session, stepRunId);
+  if (!permCheck.allowed || !permCheck.stepRun || !permCheck.workflowRun) {
+    throw new Error(permCheck.reason || 'Approval access denied');
   }
 
-  if (stepRun.status !== 'paused' || workflowRun.status !== 'paused') {
-    throw new Error(`Step run ${stepRunId} is not currently paused (Status: ${stepRun.status}).`);
-  }
-
+  const { stepRun, workflowRun } = permCheck;
   const now = new Date().toISOString();
 
   if (decision === 'reject') {
-    stepRun.status = 'failed';
-    stepRun.error = `Rejected by user ${session.user_email} (${session.role})`;
-    stepRun.finished_at = now;
-    workflowRun.status = 'failed';
-    workflowRun.error_message = `Step '${stepRun.step_name}' rejected during approval gate by ${session.user_email}.`;
-    workflowRun.finished_at = now;
+    await queryExec(
+      db,
+      `UPDATE public.step_runs SET status = 'failed', error = $1, finished_at = $2 WHERE id = $3;`,
+      [`Rejected by user ${session.user_email} (${session.role})`, now, stepRunId]
+    );
 
-    dbStore.notifySubscribers(workflowRun);
+    await queryExec(
+      db,
+      `UPDATE public.workflow_runs SET status = 'failed', error_message = $1, finished_at = $2 WHERE id = $3;`,
+      [`Step '${stepRun.step_name}' rejected during approval gate by ${session.user_email}.`, now, workflowRun.id]
+    );
+
+    await broadcastRunUpdate(workflowRun.id);
+    const updatedRun = await getWorkflowRunById(workflowRun.id);
+
     return {
       stepRun,
-      workflowRun,
-      message: `Step run rejected. Workflow run failed.`,
+      workflowRun: updatedRun!,
+      message: `Step run rejected. Workflow run failed in PostgreSQL.`,
     };
   }
 
   // Approved!
-  stepRun.status = 'completed';
-  stepRun.approved_by = session.user_id;
-  stepRun.approved_at = now;
-  stepRun.finished_at = now;
-  stepRun.output = {
+  const updatedOutput = {
     ...stepRun.output,
     approval_status: 'APPROVED',
     approved_by_email: session.user_email,
     approved_by_role: session.role,
   };
 
-  workflowRun.status = 'running';
-  dbStore.notifySubscribers(workflowRun);
+  await queryExec(
+    db,
+    `UPDATE public.step_runs SET status = 'completed', approved_by = $1, approved_at = $2, finished_at = $2, output = $3::jsonb WHERE id = $4;`,
+    [session.user_id, now, JSON.stringify(updatedOutput), stepRunId]
+  );
 
-  // Resume step loop from next step index
-  const steps = Array.from(dbStore.workflowSteps.values())
-    .filter((s) => s.workflow_id === workflowRun.workflow_id)
-    .sort((a, b) => a.step_order - b.step_order);
+  await queryExec(
+    db,
+    `UPDATE public.workflow_runs SET status = 'running' WHERE id = $1;`,
+    [workflowRun.id]
+  );
+
+  await broadcastRunUpdate(workflowRun.id);
+
+  // Resume step execution loop
+  const stepsRes = await queryExec(db, `SELECT * FROM public.workflow_steps WHERE workflow_id = $1 ORDER BY step_order ASC;`, [workflowRun.workflow_id]);
+  const steps: WorkflowStep[] = stepsRes.rows;
 
   const pausedIndex = steps.findIndex((s) => s.id === stepRun.step_id);
   const nextIndex = pausedIndex !== -1 ? pausedIndex + 1 : workflowRun.current_step_index + 1;
 
   executeStepsFromIndex(workflowRun.id, nextIndex);
 
+  const resumedRun = await getWorkflowRunById(workflowRun.id);
   return {
     stepRun,
-    workflowRun: dbStore.getWorkflowRunById(workflowRun.id)!,
-    message: `Step approved successfully by ${session.user_email}. Workflow resumed.`,
+    workflowRun: resumedRun!,
+    message: `Step approved successfully by ${session.user_email}. Workflow resumed in PostgreSQL.`,
   };
 }
 
 async function executeStepsFromIndex(runId: string, startIndex: number) {
-  const run = dbStore.workflowRuns.get(runId);
+  const db = await getPgEngine();
+  const run = await getWorkflowRunById(runId);
   if (!run) return;
 
-  const steps = Array.from(dbStore.workflowSteps.values())
-    .filter((s) => s.workflow_id === run.workflow_id)
-    .sort((a, b) => a.step_order - b.step_order);
+  const stepsRes = await queryExec(db, `SELECT * FROM public.workflow_steps WHERE workflow_id = $1 ORDER BY step_order ASC;`, [run.workflow_id]);
+  const steps: WorkflowStep[] = stepsRes.rows;
 
   let stepOutputsAccumulator: Record<string, any> = { ...run.output_payload };
 
   for (let i = startIndex; i < steps.length; i++) {
     const step = steps[i];
-    run.current_step_index = i;
 
-    // Check if run was cancelled or modified
-    if (run.status === 'failed') break;
+    // Update current step index
+    await queryExec(db, `UPDATE public.workflow_runs SET current_step_index = $1 WHERE id = $2;`, [i, runId]);
 
     const stepRunId = uuidv4();
     const now = new Date().toISOString();
 
-    const stepRun: StepRun = {
-      id: stepRunId,
-      workflow_run_id: runId,
-      step_id: step.id,
-      step_name: step.name,
-      step_type: step.type,
-      status: 'running',
-      input: {
-        step_config: step.config,
-        workflow_input: run.input_payload,
-        previous_outputs: stepOutputsAccumulator,
-      },
-      output: {},
-      attempt_count: 1,
-      started_at: now,
+    const inputData = {
+      step_config: step.config,
+      workflow_input: run.input_payload,
+      previous_outputs: stepOutputsAccumulator,
     };
 
-    dbStore.stepRuns.set(stepRunId, stepRun);
-    dbStore.notifySubscribers(run);
+    await queryExec(
+      db,
+      `INSERT INTO public.step_runs (id, workflow_run_id, step_id, step_name, step_type, status, input, attempt_count, started_at)
+       VALUES ($1, $2, $3, $4, $5, 'running', $6::jsonb, 1, $7);`,
+      [stepRunId, runId, step.id, step.name, step.type, JSON.stringify(inputData), now]
+    );
+
+    await broadcastRunUpdate(runId);
 
     try {
-      const stepResult = await executeSingleStepWithRetry(step, stepRun, stepOutputsAccumulator);
+      const stepResult = await executeSingleStepWithRetry(db, step, stepRunId, runId, stepOutputsAccumulator);
 
       if (stepResult.isPaused) {
-        // Approval Gate Paused!
-        stepRun.status = 'paused';
-        run.status = 'paused';
-        dbStore.notifySubscribers(run);
-        return; // Stop step loop until approveStep is invoked
+        // Paused at Approval Gate!
+        await queryExec(db, `UPDATE public.step_runs SET status = 'paused' WHERE id = $1;`, [stepRunId]);
+        await queryExec(db, `UPDATE public.workflow_runs SET status = 'paused' WHERE id = $1;`, [runId]);
+        await broadcastRunUpdate(runId);
+        return;
       }
 
-      stepRun.status = 'completed';
-      stepRun.output = stepResult.output;
-      stepRun.finished_at = new Date().toISOString();
+      const finishTime = new Date().toISOString();
+      await queryExec(
+        db,
+        `UPDATE public.step_runs SET status = 'completed', output = $1::jsonb, finished_at = $2 WHERE id = $3;`,
+        [JSON.stringify(stepResult.output), finishTime, stepRunId]
+      );
+
       stepOutputsAccumulator[`step_${step.step_order}`] = stepResult.output;
       stepOutputsAccumulator[step.type] = stepResult.output;
 
-      dbStore.notifySubscribers(run);
+      await broadcastRunUpdate(runId);
     } catch (err: any) {
-      stepRun.status = 'failed';
-      stepRun.error = err.message;
-      stepRun.finished_at = new Date().toISOString();
+      const failTime = new Date().toISOString();
+      await queryExec(
+        db,
+        `UPDATE public.step_runs SET status = 'failed', error = $1, finished_at = $2 WHERE id = $3;`,
+        [err.message, failTime, stepRunId]
+      );
 
-      run.status = 'failed';
-      run.error_message = `Step '${step.name}' failed: ${err.message}`;
-      run.finished_at = new Date().toISOString();
+      await queryExec(
+        db,
+        `UPDATE public.workflow_runs SET status = 'failed', error_message = $1, finished_at = $2 WHERE id = $3;`,
+        [`Step '${step.name}' failed: ${err.message}`, failTime, runId]
+      );
 
-      dbStore.notifySubscribers(run);
+      await broadcastRunUpdate(runId);
       return;
     }
   }
 
-  // All non-paused steps completed successfully!
-  run.status = 'completed';
-  run.output_payload = stepOutputsAccumulator;
-  run.finished_at = new Date().toISOString();
+  // Workflow completed!
+  const completedTime = new Date().toISOString();
+  await queryExec(
+    db,
+    `UPDATE public.workflow_runs SET status = 'completed', output_payload = $1::jsonb, finished_at = $2 WHERE id = $3;`,
+    [JSON.stringify(stepOutputsAccumulator), completedTime, runId]
+  );
 
-  // Increment Org Quota Usage on Completion
-  const org = dbStore.organizations.get(run.org_id);
-  if (org) {
-    org.calls_used += 1;
-    org.updated_at = new Date().toISOString();
-  }
+  // Increment Organization Quota Usage in PostgreSQL
+  await queryExec(
+    db,
+    `UPDATE public.organizations SET calls_used = calls_used + 1, updated_at = $1 WHERE id = $2;`,
+    [completedTime, run.org_id]
+  );
 
-  dbStore.notifySubscribers(run);
+  await broadcastRunUpdate(runId);
 }
 
 async function executeSingleStepWithRetry(
+  db: any,
   step: WorkflowStep,
-  stepRun: StepRun,
+  stepRunId: string,
+  runId: string,
   previousOutputs: Record<string, any>
 ): Promise<{ output: Record<string, any>; isPaused?: boolean }> {
-  const maxAttempts = 2; // Real retry logic (attempt 1, attempt 2)
+  const maxAttempts = 2;
   let lastError: Error | null = null;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    stepRun.attempt_count = attempt;
+    await queryExec(db, `UPDATE public.step_runs SET attempt_count = $1 WHERE id = $2;`, [attempt, stepRunId]);
 
     try {
       switch (step.type) {
@@ -293,33 +331,67 @@ async function executeSingleStepWithRetry(
 
         case 'db_write': {
           const recordId = uuidv4();
-          const rec: DbWriteRecord = {
-            id: recordId,
-            org_id: stepRun.workflow_run_id,
-            entity_type: step.config.entity_type || 'workflow_result',
-            data: {
-              summary: 'Persisted workflow result',
-              previous_outputs: previousOutputs,
-              saved_at: new Date().toISOString(),
-            },
-            created_at: new Date().toISOString(),
-          };
-          dbStore.dbWriteRecords.set(rec.id, rec);
-          return { output: { record_id: rec.id, entity_type: rec.entity_type, status: 'SAVED' } };
+          const runRes = await queryExec(db, `SELECT org_id FROM public.workflow_runs WHERE id = $1;`, [runId]);
+          const orgId = runRes.rows[0]?.org_id;
+
+          await queryExec(
+            db,
+            `INSERT INTO public.db_write_records (id, org_id, workflow_run_id, entity_type, data)
+             VALUES ($1, $2, $3, $4, $5::jsonb);`,
+            [
+              recordId,
+              orgId,
+              runId,
+              step.config.entity_type || 'workflow_result',
+              JSON.stringify({ summary: 'Persisted workflow result in PostgreSQL', previous_outputs: previousOutputs }),
+            ]
+          );
+
+          return { output: { record_id: recordId, entity_type: step.config.entity_type || 'workflow_result', status: 'SAVED_TO_POSTGRES' } };
         }
 
         case 'notify': {
           const notifId = uuidv4();
-          const notif: NotificationLog = {
-            id: notifId,
-            org_id: stepRun.workflow_run_id,
-            recipient: step.config.recipient || '#ops-channel',
-            message: `Alert: Workflow completed successfully. Result: ${JSON.stringify(previousOutputs['conditional_branch'] || {})}`,
-            channel: step.config.channel || 'slack',
-            created_at: new Date().toISOString(),
-          };
-          dbStore.notificationsLog.set(notif.id, notif);
-          return { output: { notification_id: notif.id, sent_to: notif.recipient, status: 'DELIVERED' } };
+          const runRes = await queryExec(db, `SELECT org_id FROM public.workflow_runs WHERE id = $1;`, [runId]);
+          const orgId = runRes.rows[0]?.org_id;
+
+          // INSERT into notifications_log in PostgreSQL (Triggers Hasura Event Trigger!)
+          await queryExec(
+            db,
+            `INSERT INTO public.notifications_log (id, org_id, workflow_run_id, recipient, message, channel)
+             VALUES ($1, $2, $3, $4, $5, $6);`,
+            [
+              notifId,
+              orgId,
+              runId,
+              step.config.recipient || '#ops-channel',
+              `Alert: Workflow completed successfully. Result: ${JSON.stringify(previousOutputs['conditional_branch'] || {})}`,
+              step.config.channel || 'slack',
+            ]
+          );
+
+          // Dispatch event trigger webhook call
+          try {
+            await fetch('http://localhost:3000/api/webhooks/notify', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                event: {
+                  data: {
+                    new: {
+                      id: notifId,
+                      recipient: step.config.recipient || '#ops-channel',
+                      message: 'Alert dispatched via Hasura Event Trigger',
+                    },
+                  },
+                },
+              }),
+            });
+          } catch (e) {
+            console.warn('Notification webhook call:', e);
+          }
+
+          return { output: { notification_id: notifId, sent_to: step.config.recipient || '#ops-channel', status: 'EVENT_TRIGGER_DISPATCHED' } };
         }
 
         default:
@@ -328,11 +400,19 @@ async function executeSingleStepWithRetry(
     } catch (err: any) {
       lastError = err;
       if (attempt < maxAttempts) {
-        // Wait before retry
         await new Promise((res) => setTimeout(res, 400));
       }
     }
   }
 
   throw lastError || new Error(`Step execution failed after ${maxAttempts} attempts`);
+}
+
+async function queryExec(db: any, text: string, params: any[] = []): Promise<any> {
+  if (db.query) {
+    return await db.query(text, params);
+  } else if (db.exec) {
+    return await db.exec(text, params);
+  }
+  throw new Error('Unsupported database driver');
 }

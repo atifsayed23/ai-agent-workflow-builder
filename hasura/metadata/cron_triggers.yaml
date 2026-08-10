@@ -1,0 +1,8 @@
+- name: hourly_scheduled_workflow_runner
+  webhook: "{{ACTION_BASE_URL}}/api/webhooks/workflow/11111111-2222-4111-a111-111111111111"
+  schedule: "0 * * * *"
+  payload:
+    scheduled_by: "hasura_cron_trigger"
+    environment: "production"
+  include_in_metadata: true
+  comment: "Hourly cron trigger for scheduled workflow runs"

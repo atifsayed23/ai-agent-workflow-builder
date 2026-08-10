@@ -2,7 +2,7 @@
 
 import React, { useState } from 'react';
 import { UserSession } from '@/lib/types';
-import { ShieldAlert, ShieldCheck, Lock, Terminal, Play } from 'lucide-react';
+import { ShieldAlert, ShieldCheck, Lock, Play } from 'lucide-react';
 
 interface SecurityTestPanelProps {
   session: UserSession;
@@ -12,11 +12,12 @@ export function SecurityTestPanel({ session }: SecurityTestPanelProps) {
   const [testResult, setTestResult] = useState<any | null>(null);
   const [loading, setLoading] = useState(false);
 
+  const targetWfId = '11111111-2222-4111-a111-111111111111'; // Org A Workflow ID
+
   const runAttackSimulation = async (attackType: 'direct_query' | 'trigger_cross_org' | 'approve_cross_org') => {
     setLoading(true);
     setTestResult(null);
 
-    const targetWfId = 'wf-acme-agent-001'; // Org A Workflow ID
     const targetStepRunId = 'step-a4-paused-run';
 
     try {
@@ -46,14 +47,14 @@ export function SecurityTestPanel({ session }: SecurityTestPanelProps) {
 
         const data = await res.json();
         setTestResult({
-          attack: 'Direct ID Guessing (GraphQL Query)',
+          attack: 'Direct ID Guessing (GraphQL Query against PostgreSQL)',
           attemptedId: targetWfId,
           attackerOrg: session.org_id,
           targetOrg: '11111111-1111-4111-a111-111111111111 (Org A)',
           responseStatus: res.status,
           responseBody: data,
           passed: data.data?.workflow_by_pk === null && (data.errors?.length > 0 || true),
-          summary: 'Layer 1 RLS isolation verified: GraphQL query returned null data.',
+          summary: 'Authoritative org_members RLS verified: GraphQL query returned null / RLS Permission Denied.',
         });
       } else if (attackType === 'trigger_cross_org') {
         const res = await fetch('/api/actions/trigger-workflow', {
@@ -76,7 +77,7 @@ export function SecurityTestPanel({ session }: SecurityTestPanelProps) {
           attackerOrg: session.org_id,
           responseStatus: res.status,
           responseBody: data,
-          passed: res.status === 403 || data.message?.includes('Permission Denied'),
+          passed: res.status === 403 || data.message?.includes('RLS Violation') || data.message?.includes('Permission Denied'),
           summary: 'Hasura Action rejected unauthorized execution across organization boundaries.',
         });
       } else if (attackType === 'approve_cross_org') {
@@ -101,7 +102,7 @@ export function SecurityTestPanel({ session }: SecurityTestPanelProps) {
           attackerOrg: session.org_id,
           responseStatus: res.status,
           responseBody: data,
-          passed: res.status === 403 || data.message?.includes('Permission Denied') || data.message?.includes('RLS'),
+          passed: res.status === 403 || data.message?.includes('RLS Violation') || data.message?.includes('Permission Denied'),
           summary: 'Layer 2 Action gating blocked approval attempt from unauthorized organization.',
         });
       }
@@ -121,10 +122,10 @@ export function SecurityTestPanel({ session }: SecurityTestPanelProps) {
       <div>
         <h3 className="text-lg font-bold text-white flex items-center gap-2">
           <Lock className="w-5 h-5 text-rose-400" />
-          <span>Cross-Org Penetration Attack Simulator</span>
+          <span>Authoritative Cross-Org Penetration Attack Simulator</span>
         </h3>
         <p className="text-xs text-slate-400">
-          Actively test Layer 1 RLS and Layer 2 Action gating by attempting to access Org A resources while logged in as Org B context.
+          Actively test Layer 1 RLS and Layer 2 Action gating against org_members table by attempting to access Org A resources while logged in as Org B context.
         </p>
       </div>
 

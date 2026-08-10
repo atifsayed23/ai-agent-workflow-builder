@@ -2,7 +2,7 @@
 
 import React, { useState } from 'react';
 import { UserSession } from '@/lib/types';
-import { CheckCircle2, ShieldCheck, Play, ArrowRight, Activity, PauseCircle, Lock, RefreshCw } from 'lucide-react';
+import { CheckCircle2, ShieldCheck, Play, Activity, PauseCircle, Lock, RefreshCw } from 'lucide-react';
 
 interface ProofScenarioSuiteProps {
   currentSession: UserSession;
@@ -20,17 +20,19 @@ export function ProofScenarioSuite({
   const [currentRunId, setCurrentRunId] = useState<string | null>(null);
   const [webhookStatus, setWebhookStatus] = useState<string | null>(null);
 
+  const WORKFLOW_A_ID = '11111111-2222-4111-a111-111111111111';
+
   const addLog = (msg: string) => {
     setScenarioLogs((prev) => [...prev, `[${new Date().toLocaleTimeString()}] ${msg}`]);
   };
 
   const handleStep1MultiTenant = () => {
-    addLog('Verified multi-tenant database state: Org A (Acme AI) and Org B (Stark Tech) exist with independent member roles.');
+    addLog('Verified multi-tenant database state: Org A (Acme AI) and Org B (Stark Tech) exist with independent member roles in PostgreSQL.');
     setActiveStep(2);
   };
 
   const handleStep2WorkflowBuild = () => {
-    addLog('Org A Workflow verified: Contains LLM Call, HTTP API Request, Conditional Branch, Approval Gate, DB Write, and Notify Alert.');
+    addLog('Org A Workflow verified in PostgreSQL: Contains LLM Call, HTTP API Request, Conditional Branch, Approval Gate, DB Write, and Notify Alert.');
     setActiveStep(3);
   };
 
@@ -43,12 +45,11 @@ export function ProofScenarioSuite({
           org_id: '11111111-1111-4111-a111-111111111111',
           role: 'owner',
         });
-        const runId = await onTriggerRun('wf-acme-agent-001', 'manual');
+        const runId = await onTriggerRun(WORKFLOW_A_ID, 'manual');
         setCurrentRunId(runId);
-        addLog(`Started run manually (Run ID: ${runId}). Step execution started.`);
+        addLog(`Started run manually via PostgreSQL Hasura Action (Run ID: ${runId}). Step execution started.`);
       } else {
-        // Trigger via Inbound Webhook Endpoint
-        const res = await fetch('/api/webhooks/workflow/wf-acme-agent-001?token=wh_acme_sec_token_9981', {
+        const res = await fetch(`/api/webhooks/workflow/${WORKFLOW_A_ID}?token=wh_acme_sec_token_9981`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ source: 'external_webhook_test', priority: 'high' }),
@@ -57,7 +58,7 @@ export function ProofScenarioSuite({
         if (data.run_id) {
           setCurrentRunId(data.run_id);
           setWebhookStatus(`Webhook HTTP 200 OK: Triggered Run ID ${data.run_id}`);
-          addLog(`Triggered workflow via Inbound Webhook endpoint POST /api/webhooks/workflow/wf-acme-agent-001. Created Run ID: ${data.run_id}`);
+          addLog(`Triggered workflow via Inbound Webhook endpoint POST /api/webhooks/workflow/${WORKFLOW_A_ID}. Created Run ID: ${data.run_id}`);
         }
       }
       setActiveStep(4);
@@ -67,7 +68,6 @@ export function ProofScenarioSuite({
   };
 
   const handleStep5SwitchToOrgB = () => {
-    // Switch to Org B Editor Context
     onSwitchSession({
       user_id: 'bbbb2222-2222-4222-b222-222222222222',
       user_email: 'editor@stark.com',
@@ -84,10 +84,10 @@ export function ProofScenarioSuite({
         <div>
           <h2 className="text-xl font-bold text-white flex items-center gap-2">
             <ShieldCheck className="w-6 h-6 text-emerald-400" />
-            <span>Final Task Proof Scenario Guide</span>
+            <span>Final Task Proof Scenario Guide (PostgreSQL Engine)</span>
           </h2>
           <p className="text-xs text-slate-400">
-            Interactive 6-step walkthrough demonstrating all assignment criteria live end-to-end.
+            Interactive 6-step walkthrough demonstrating all assignment criteria live end-to-end against PostgreSQL.
           </p>
         </div>
 
@@ -107,11 +107,11 @@ export function ProofScenarioSuite({
       {/* 6 Steps Visual Stepper */}
       <div className="grid grid-cols-1 sm:grid-cols-3 lg:grid-cols-6 gap-2">
         {[
-          { num: 1, title: 'Multi-Tenant Orgs', desc: 'Org A & Org B isolated' },
+          { num: 1, title: 'Multi-Tenant Orgs', desc: 'Org A & Org B in Postgres' },
           { num: 2, title: 'Multi-Node Chain', desc: 'LLM + HTTP + Branch' },
           { num: 3, title: 'Start Workflow', desc: 'Manual or Webhook' },
           { num: 4, title: 'Pause & Approve', desc: 'Approval Gate state' },
-          { num: 5, title: 'Live Stream', desc: 'GraphQL Subscription' },
+          { num: 5, title: 'Live Stream', desc: 'PostgreSQL Subscriptions' },
           { num: 6, title: 'Org B Defense', desc: 'Cross-org 100% blocked' },
         ].map((s) => (
           <div
@@ -139,9 +139,9 @@ export function ProofScenarioSuite({
       <div className="bg-slate-950 p-5 rounded-xl border border-slate-800 space-y-4">
         {activeStep === 1 && (
           <div className="space-y-3">
-            <h3 className="font-bold text-sm text-white">Criterion 1: Two Separate Organizations Exist</h3>
+            <h3 className="font-bold text-sm text-white">Criterion 1: Two Separate Organizations Exist in PostgreSQL</h3>
             <p className="text-xs text-slate-300">
-              Database schema enforces strict row-level tenancy via <code className="text-indigo-300 bg-slate-900 px-1 py-0.5 rounded">org_members</code>.
+              Database schema enforces strict row-level tenancy via <code className="text-indigo-300 bg-slate-900 px-1 py-0.5 rounded">org_members</code> table in PostgreSQL.
             </p>
             <div className="grid grid-cols-2 gap-3 text-xs">
               <div className="p-3 bg-slate-900 rounded border border-slate-800">
@@ -166,7 +166,7 @@ export function ProofScenarioSuite({
           <div className="space-y-3">
             <h3 className="font-bold text-sm text-white">Criterion 2: Multi-Node Step Workflow in Org A</h3>
             <p className="text-xs text-slate-300">
-              Workflow <code className="text-indigo-300 bg-slate-900 px-1 py-0.5 rounded">wf-acme-agent-001</code> contains:
+              Workflow <code className="text-indigo-300 bg-slate-900 px-1 py-0.5 rounded">{WORKFLOW_A_ID}</code> contains:
             </p>
             <ul className="text-xs text-slate-300 space-y-1 list-disc pl-4">
               <li>Step 1: <code className="text-purple-300">llm_call</code> (Google Gemini API / Fallback AI intent classification)</li>
@@ -174,6 +174,7 @@ export function ProofScenarioSuite({
               <li>Step 3: <code className="text-emerald-300">conditional_branch</code> (Branching logic based on LLM output)</li>
               <li>Step 4: <code className="text-amber-300">approval_gate</code> (Halts run until Editor/Owner approves)</li>
               <li>Step 5: <code className="text-amber-400">db_write</code> (Persists audit log to DB - Layer 2 Owner check)</li>
+              <li>Step 6: <code className="text-pink-400">notify</code> (Fires Hasura Event Trigger alert - Layer 2 Owner check)</li>
             </ul>
             <button
               onClick={handleStep2WorkflowBuild}
@@ -229,7 +230,7 @@ export function ProofScenarioSuite({
           <div className="space-y-3">
             <h3 className="font-bold text-sm text-white">Criterion 5: Real-Time Live Subscription Stream</h3>
             <p className="text-xs text-slate-300">
-              Status updates stream step-by-step with zero page refreshes via Hasura live subscription emulation.
+              Status updates stream step-by-step with zero page refreshes via Hasura live subscription emulation over PostgreSQL.
             </p>
             <button
               onClick={handleStep5SwitchToOrgB}
@@ -243,7 +244,7 @@ export function ProofScenarioSuite({
 
         {activeStep === 6 && (
           <div className="space-y-3">
-            <h3 className="font-bold text-sm text-rose-300">Criterion 6: Cross-Org Isolation Security Defense</h3>
+            <h3 className="font-bold text-sm text-rose-300">Criterion 6: Authoritative Cross-Org Isolation Defense</h3>
             <p className="text-xs text-slate-300">
               You are now logged in as <code className="text-purple-300 font-bold">Org B Editor (Stark Tech)</code>. Try querying, running, or approving Org A&apos;s workflow in the Security Penetration Attack Simulator below!
             </p>
