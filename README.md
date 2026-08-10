@@ -1,5 +1,8 @@
 # AI Agent Workflow Builder (Nhost + Hasura + PostgreSQL + GraphQL)
 
+🚀 **Live Demo**: [https://ai-agent-workflow-builder-dun.vercel.app](https://ai-agent-workflow-builder-dun.vercel.app)
+📁 **GitHub Repo**: [https://github.com/atifsayed23/ai-agent-workflow-builder](https://github.com/atifsayed23/ai-agent-workflow-builder)
+
 A multi-tenant AI agent workflow orchestrator built with **Nhost**, **Hasura GraphQL Engine**, **PostgreSQL**, and **Next.js 14**. Users within an organization create, order, and execute multi-step AI agent workflows with dual-layer security, Hasura Actions, Hasura Event Triggers, and live GraphQL subscriptions.
 
 ---
