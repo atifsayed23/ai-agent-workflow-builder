@@ -1,83 +1,116 @@
-# Hasura Layer 1 & Layer 2 Permission Rules
-
-# Layer 1: Org & Role Scoping
-# Every table is scoped to caller's X-Hasura-Org-Id from org_members lookup.
-# Roles: owner, editor, viewer.
+# Hasura Layer 1 Row-Level Security (RLS) Permissions
+# Every permission explicitly verifies membership through org_members table.
 
 permissions:
-  workflows:
+  organizations:
     select:
       - role: owner
-        filter: { org_id: { _eq: "X-Hasura-Org-Id" } }
+        filter: { members: { user_id: { _eq: "X-Hasura-User-Id" } } }
       - role: editor
-        filter: { org_id: { _eq: "X-Hasura-Org-Id" } }
+        filter: { members: { user_id: { _eq: "X-Hasura-User-Id" } } }
       - role: viewer
-        filter: { org_id: { _eq: "X-Hasura-Org-Id" } }
-
-    insert:
-      - role: owner
-        check: { org_id: { _eq: "X-Hasura-Org-Id" } }
-      - role: editor
-        check: { org_id: { _eq: "X-Hasura-Org-Id" } }
-      # Viewer role cannot insert (read-only)
-
-    update:
-      - role: owner
-        filter: { org_id: { _eq: "X-Hasura-Org-Id" } }
-      - role: editor
-        filter: { org_id: { _eq: "X-Hasura-Org-Id" } }
-
-    delete:
-      - role: owner
-        filter: { org_id: { _eq: "X-Hasura-Org-Id" } }
-
-  workflow_steps:
-    select:
-      - role: owner
-        filter: { workflow: { org_id: { _eq: "X-Hasura-Org-Id" } } }
-      - role: editor
-        filter: { workflow: { org_id: { _eq: "X-Hasura-Org-Id" } } }
-      - role: viewer
-        filter: { workflow: { org_id: { _eq: "X-Hasura-Org-Id" } } }
-
-    # Layer 2 Step Gating: High-privilege steps (db_write, notify, webhook trigger) require 'owner' role.
-    insert:
-      - role: owner
-        check: { workflow: { org_id: { _eq: "X-Hasura-Org-Id" } } }
-      - role: editor
-        # Editors can insert standard steps (llm_call, http_request, conditional_branch, approval_gate)
-        # but NOT high-privilege steps (db_write, notify)
-        check: 
-          _and:
-            - { workflow: { org_id: { _eq: "X-Hasura-Org-Id" } } }
-            - { type: { _nin: ["db_write", "notify"] } }
-
-  workflow_runs:
-    select:
-      - role: owner
-        filter: { org_id: { _eq: "X-Hasura-Org-Id" } }
-      - role: editor
-        filter: { org_id: { _eq: "X-Hasura-Org-Id" } }
-      - role: viewer
-        filter: { org_id: { _eq: "X-Hasura-Org-Id" } }
-
-  step_runs:
-    select:
-      - role: owner
-        filter: { workflow_run: { org_id: { _eq: "X-Hasura-Org-Id" } } }
-      - role: editor
-        filter: { workflow_run: { org_id: { _eq: "X-Hasura-Org-Id" } } }
-      - role: viewer
-        filter: { workflow_run: { org_id: { _eq: "X-Hasura-Org-Id" } } }
+        filter: { members: { user_id: { _eq: "X-Hasura-User-Id" } } }
 
   org_members:
     select:
       - role: owner
-        filter: { org_id: { _eq: "X-Hasura-Org-Id" } }
+        filter: { organization: { members: { user_id: { _eq: "X-Hasura-User-Id" } } } }
       - role: editor
-        filter: { org_id: { _eq: "X-Hasura-Org-Id" } }
+        filter: { organization: { members: { user_id: { _eq: "X-Hasura-User-Id" } } } }
       - role: viewer
-        filter: { org_id: { _eq: "X-Hasura-Org-Id" } }
+        filter: { organization: { members: { user_id: { _eq: "X-Hasura-User-Id" } } } }
     insert:
       - role: owner
-        check: { org_id: { _eq: "X-Hasura-Org-Id" } }
+        check: { organization: { members: { user_id: { _eq: "X-Hasura-User-Id" }, role: { _eq: "owner" } } } }
+
+  workflows:
+    select:
+      - role: owner
+        filter: { organization: { members: { user_id: { _eq: "X-Hasura-User-Id" } } } }
+      - role: editor
+        filter: { organization: { members: { user_id: { _eq: "X-Hasura-User-Id" } } } }
+      - role: viewer
+        filter: { organization: { members: { user_id: { _eq: "X-Hasura-User-Id" } } } }
+
+    insert:
+      - role: owner
+        check: { organization: { members: { user_id: { _eq: "X-Hasura-User-Id" }, role: { _eq: "owner" } } } }
+      - role: editor
+        check: { organization: { members: { user_id: { _eq: "X-Hasura-User-Id" }, role: { _eq: "editor" } } } }
+
+    update:
+      - role: owner
+        filter: { organization: { members: { user_id: { _eq: "X-Hasura-User-Id" }, role: { _eq: "owner" } } } }
+      - role: editor
+        filter: { organization: { members: { user_id: { _eq: "X-Hasura-User-Id" }, role: { _eq: "editor" } } } }
+
+    delete:
+      - role: owner
+        filter: { organization: { members: { user_id: { _eq: "X-Hasura-User-Id" }, role: { _eq: "owner" } } } }
+
+  workflow_steps:
+    select:
+      - role: owner
+        filter: { workflow: { organization: { members: { user_id: { _eq: "X-Hasura-User-Id" } } } } }
+      - role: editor
+        filter: { workflow: { organization: { members: { user_id: { _eq: "X-Hasura-User-Id" } } } } }
+      - role: viewer
+        filter: { workflow: { organization: { members: { user_id: { _eq: "X-Hasura-User-Id" } } } } }
+
+    insert:
+      - role: owner
+        check: { workflow: { organization: { members: { user_id: { _eq: "X-Hasura-User-Id" }, role: { _eq: "owner" } } } } }
+      - role: editor
+        check:
+          _and:
+            - { workflow: { organization: { members: { user_id: { _eq: "X-Hasura-User-Id" }, role: { _eq: "editor" } } } } }
+            - { type: { _nin: ["db_write", "notify"] } } # Layer 2 Step Sandbox Guard
+
+  workflow_triggers:
+    select:
+      - role: owner
+        filter: { workflow: { organization: { members: { user_id: { _eq: "X-Hasura-User-Id" } } } } }
+      - role: editor
+        filter: { workflow: { organization: { members: { user_id: { _eq: "X-Hasura-User-Id" } } } } }
+      - role: viewer
+        filter: { workflow: { organization: { members: { user_id: { _eq: "X-Hasura-User-Id" } } } } }
+
+    insert:
+      - role: owner
+        check: { workflow: { organization: { members: { user_id: { _eq: "X-Hasura-User-Id" }, role: { _eq: "owner" } } } } }
+
+  workflow_runs:
+    select:
+      - role: owner
+        filter: { organization: { members: { user_id: { _eq: "X-Hasura-User-Id" } } } }
+      - role: editor
+        filter: { organization: { members: { user_id: { _eq: "X-Hasura-User-Id" } } } }
+      - role: viewer
+        filter: { organization: { members: { user_id: { _eq: "X-Hasura-User-Id" } } } }
+
+  step_runs:
+    select:
+      - role: owner
+        filter: { workflow_run: { organization: { members: { user_id: { _eq: "X-Hasura-User-Id" } } } } }
+      - role: editor
+        filter: { workflow_run: { organization: { members: { user_id: { _eq: "X-Hasura-User-Id" } } } } }
+      - role: viewer
+        filter: { workflow_run: { organization: { members: { user_id: { _eq: "X-Hasura-User-Id" } } } } }
+
+  db_write_records:
+    select:
+      - role: owner
+        filter: { organization: { members: { user_id: { _eq: "X-Hasura-User-Id" } } } }
+      - role: editor
+        filter: { organization: { members: { user_id: { _eq: "X-Hasura-User-Id" } } } }
+      - role: viewer
+        filter: { organization: { members: { user_id: { _eq: "X-Hasura-User-Id" } } } }
+
+  notifications_log:
+    select:
+      - role: owner
+        filter: { organization: { members: { user_id: { _eq: "X-Hasura-User-Id" } } } }
+      - role: editor
+        filter: { organization: { members: { user_id: { _eq: "X-Hasura-User-Id" } } } }
+      - role: viewer
+        filter: { organization: { members: { user_id: { _eq: "X-Hasura-User-Id" } } } }

@@ -1,7 +1,6 @@
 - table:
     schema: public
     name: organizations
-  object_relationships: []
   array_relationships:
     - name: members
       using:
@@ -105,6 +104,26 @@
     - name: workflow_run
       using:
         foreign_key_constraint_on: workflow_run_id
-    - name: step
+
+- table:
+    schema: public
+    name: db_write_records
+  object_relationships:
+    - name: organization
       using:
-        foreign_key_constraint_on: step_id
+        foreign_key_constraint_on: org_id
+
+- table:
+    schema: public
+    name: notifications_log
+  object_relationships:
+    - name: organization
+      using:
+        foreign_key_constraint_on: org_id
+  event_triggers:
+    - name: notify_alert_trigger
+      definition:
+        enable_manual: true
+        insert:
+          columns: "*"
+      webhook: "{{ACTION_BASE_URL}}/api/webhooks/notify"

@@ -26,6 +26,14 @@ export type StepType =
   | 'conditional_branch'
   | 'approval_gate';
 
+export type ConditionOperator = 
+  | 'equals'
+  | 'not_equals'
+  | 'contains'
+  | 'not_contains'
+  | 'greater_than'
+  | 'less_than';
+
 export interface StepConfig {
   prompt?: string;
   model?: string;
@@ -36,7 +44,13 @@ export interface StepConfig {
   entity_type?: string;
   recipient?: string;
   channel?: 'slack' | 'email';
-  condition_expression?: string; // e.g. "output.status === 'OK'" or "output.length > 10"
+  
+  // Structured Conditional Branching Config
+  field?: string; // e.g. "output.status" or "output.text"
+  operator?: ConditionOperator; // "equals" | "contains" | "greater_than" etc.
+  value?: string | number; // target comparison value
+  condition_expression?: string; // fallback expression string
+  
   required_role?: OrgRole;
   [key: string]: any;
 }
@@ -138,6 +152,7 @@ export interface NotificationLog {
 export interface UserSession {
   user_id: string;
   user_email: string;
+  user_name?: string;
   org_id: string;
   role: OrgRole;
 }

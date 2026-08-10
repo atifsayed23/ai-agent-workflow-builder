@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { dbStore } from '@/lib/db-store';
+import { getPgEngine, getWorkflowById } from '@/lib/postgres-store';
 import { triggerWorkflowRun } from '@/lib/workflow-runner';
 import { UserSession } from '@/lib/types';
 
@@ -9,28 +9,35 @@ export async function POST(
 ) {
   try {
     const workflowId = params.id;
+    const db = await getPgEngine();
     const body = await req.json().catch(() => ({}));
     const secretToken = req.headers.get('x-webhook-secret') || req.nextUrl.searchParams.get('token');
 
-    const workflow = dbStore.workflows.get(workflowId);
+    // 1. Fetch Workflow from PostgreSQL
+    const workflow = await getWorkflowById(workflowId);
     if (!workflow) {
       return NextResponse.json({ error: `Workflow not found: ${workflowId}` }, { status: 404 });
     }
 
-    const triggers = Array.from(dbStore.workflowTriggers.values()).filter(
-      (t) => t.workflow_id === workflowId && t.type === 'webhook'
+    // 2. Fetch Webhook Triggers for this workflow from PostgreSQL
+    const trigRes = await db.query(
+      `SELECT config FROM public.workflow_triggers WHERE workflow_id = $1 AND type = 'webhook';`,
+      [workflowId]
     );
 
-    if (triggers.length === 0) {
+    if (trigRes.rows.length === 0) {
       return NextResponse.json({ error: 'No webhook trigger configured for this workflow' }, { status: 400 });
     }
 
-    const expectedToken = triggers[0].config.secret_token;
+    const config = typeof trigRes.rows[0].config === 'string' ? JSON.parse(trigRes.rows[0].config) : trigRes.rows[0].config;
+    const expectedToken = config?.secret_token;
+
+    // Strict Webhook Authentication Check
     if (expectedToken && secretToken !== expectedToken) {
       return NextResponse.json({ error: 'Invalid or missing webhook secret token' }, { status: 401 });
     }
 
-    // System execution session using workflow owner's identity
+    // System execution session using workflow creator's identity
     const session: UserSession = {
       user_id: workflow.created_by,
       user_email: 'webhook-system@acme.com',

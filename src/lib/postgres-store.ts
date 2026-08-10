@@ -196,7 +196,7 @@ async function initializePostgresSchema(db: any) {
       // Seed Org A Workflow
       await db.query(
         `INSERT INTO public.workflows (id, org_id, name, description, is_active, created_by) VALUES
-         ($1, $2, 'Customer Support Auto-Responder & Security Audit', 'Chains LLM analysis, external HTTP verification, conditional logic, and an approval gate before committing to database.', true, $3);`,
+         ($1, $2, 'Customer Support Auto-Responder & Security Audit', 'Chains LLM analysis, external HTTP verification, structured conditional logic, and an approval gate before committing to database.', true, $3);`,
         [WORKFLOW_A_ID, ORG_A_ID, USER_A_OWNER_ID]
       );
 
@@ -204,7 +204,7 @@ async function initializePostgresSchema(db: any) {
       const steps = [
         [uuidv4(), WORKFLOW_A_ID, 1, 'LLM Sentiment & Intent Classifier', 'llm_call', JSON.stringify({ prompt: 'Analyze customer request: "Urgent issue with account access. Please reset credentials immediately." Classify intent, sentiment, and urgency.', model: 'gemini-1.5-flash' })],
         [uuidv4(), WORKFLOW_A_ID, 2, 'Check User Risk Score API', 'http_request', JSON.stringify({ url: 'https://jsonplaceholder.typicode.com/posts/1', method: 'GET', headers: { 'Accept': 'application/json' } })],
-        [uuidv4(), WORKFLOW_A_ID, 3, 'Evaluate Security Risk Condition', 'conditional_branch', JSON.stringify({ condition_expression: 'prev_output.status === 200 || prev_output.text.includes("POSITIVE")' })],
+        [uuidv4(), WORKFLOW_A_ID, 3, 'Evaluate Security Risk Condition', 'conditional_branch', JSON.stringify({ field: 'output.status', operator: 'equals', value: 200 })],
         [uuidv4(), WORKFLOW_A_ID, 4, 'Executive Approval Gate', 'approval_gate', JSON.stringify({ required_role: 'editor' })],
         [uuidv4(), WORKFLOW_A_ID, 5, 'Persist Security Audit Log', 'db_write', JSON.stringify({ entity_type: 'security_audit' })],
         [uuidv4(), WORKFLOW_A_ID, 6, 'Send Slack Notification Alert', 'notify', JSON.stringify({ recipient: '#sec-ops-channel', channel: 'slack' })],
@@ -244,6 +244,38 @@ async function initializePostgresSchema(db: any) {
   } catch (err) {
     console.error('PostgreSQL Initialization Error:', err);
   }
+}
+
+// --- ATOMIC QUOTA ENFORCEMENT IN POSTGRESQL ---
+export async function incrementOrgQuotaAtomic(orgId: string): Promise<{ success: boolean; calls_used?: number; calls_allowed?: number; reason?: string }> {
+  const db = await getPgEngine();
+  
+  // Single atomic UPDATE statement preventing race conditions
+  const res = await db.query(
+    `UPDATE public.organizations
+     SET calls_used = calls_used + 1, updated_at = NOW()
+     WHERE id = $1 AND calls_used < calls_allowed
+     RETURNING id, calls_used, calls_allowed;`,
+    [orgId]
+  );
+
+  if (res.rows.length === 0) {
+    const fetchOrg = await db.query(`SELECT calls_used, calls_allowed FROM public.organizations WHERE id = $1;`, [orgId]);
+    const current = fetchOrg.rows[0] || { calls_used: 0, calls_allowed: 0 };
+
+    return {
+      success: false,
+      calls_used: current.calls_used,
+      calls_allowed: current.calls_allowed,
+      reason: `Quota Exceeded: Organization has reached its limit (${current.calls_used}/${current.calls_allowed} used).`,
+    };
+  }
+
+  return {
+    success: true,
+    calls_used: res.rows[0].calls_used,
+    calls_allowed: res.rows[0].calls_allowed,
+  };
 }
 
 // --- Authoritative Layer 1 Security Verification via org_members Table ---

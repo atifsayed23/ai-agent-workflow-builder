@@ -5,7 +5,8 @@ import {
   checkLayer2ApprovalRole,
   getWorkflowRunById,
   getWorkflowById,
-  getOrganizationById
+  getOrganizationById,
+  incrementOrgQuotaAtomic
 } from './postgres-store';
 import { executeLlmCall } from './llm-service';
 import {
@@ -14,8 +15,7 @@ import {
   WorkflowStep,
   UserSession,
   TriggerType,
-  DbWriteRecord,
-  NotificationLog
+  ConditionOperator
 } from './types';
 
 // Real-time live subscription broadcast listeners
@@ -60,7 +60,7 @@ export async function triggerWorkflowRun(
     throw new Error(`Layer 1 Role Violation: Role 'viewer' is read-only and cannot trigger workflow runs.`);
   }
 
-  // 4. Quota Check in PostgreSQL organizations table
+  // 4. Pre-run Quota Check in PostgreSQL organizations table
   const org = await getOrganizationById(workflow.org_id);
   if (!org) throw new Error('Organization not found');
 
@@ -244,19 +244,25 @@ async function executeStepsFromIndex(runId: string, startIndex: number) {
     }
   }
 
+  // ATOMIC QUOTA ENFORCEMENT ON WORKFLOW COMPLETION
+  const quotaResult = await incrementOrgQuotaAtomic(run.org_id);
+  if (!quotaResult.success) {
+    const failTime = new Date().toISOString();
+    await queryExec(
+      db,
+      `UPDATE public.workflow_runs SET status = 'failed', error_message = $1, finished_at = $2 WHERE id = $3;`,
+      [quotaResult.reason, failTime, runId]
+    );
+    await broadcastRunUpdate(runId);
+    return;
+  }
+
   // Workflow completed!
   const completedTime = new Date().toISOString();
   await queryExec(
     db,
     `UPDATE public.workflow_runs SET status = 'completed', output_payload = $1::jsonb, finished_at = $2 WHERE id = $3;`,
     [JSON.stringify(stepOutputsAccumulator), completedTime, runId]
-  );
-
-  // Increment Organization Quota Usage in PostgreSQL
-  await queryExec(
-    db,
-    `UPDATE public.organizations SET calls_used = calls_used + 1, updated_at = $1 WHERE id = $2;`,
-    [completedTime, run.org_id]
   );
 
   await broadcastRunUpdate(runId);
@@ -302,21 +308,8 @@ async function executeSingleStepWithRetry(
         }
 
         case 'conditional_branch': {
-          const expr = step.config.condition_expression || 'true';
-          const prevLlmText = previousOutputs['llm_call']?.text || '';
-          const prevHttpStatus = previousOutputs['http_request']?.status || 200;
-
-          const conditionPassed = Boolean(
-            expr.includes('200') ? prevHttpStatus === 200 : prevLlmText.length > 5
-          );
-
-          return {
-            output: {
-              condition_evaluated: expr,
-              passed: conditionPassed,
-              branch_taken: conditionPassed ? 'TRUE_PATH' : 'FALSE_PATH',
-            },
-          };
+          const conditionResult = evaluateStructuredCondition(step.config, previousOutputs);
+          return { output: conditionResult };
         }
 
         case 'approval_gate': {
@@ -355,7 +348,6 @@ async function executeSingleStepWithRetry(
           const runRes = await queryExec(db, `SELECT org_id FROM public.workflow_runs WHERE id = $1;`, [runId]);
           const orgId = runRes.rows[0]?.org_id;
 
-          // INSERT into notifications_log in PostgreSQL (Triggers Hasura Event Trigger!)
           await queryExec(
             db,
             `INSERT INTO public.notifications_log (id, org_id, workflow_run_id, recipient, message, channel)
@@ -370,7 +362,7 @@ async function executeSingleStepWithRetry(
             ]
           );
 
-          // Dispatch event trigger webhook call
+          // Dispatch Hasura Event Trigger endpoint
           try {
             await fetch('http://localhost:3000/api/webhooks/notify', {
               method: 'POST',
@@ -406,6 +398,54 @@ async function executeSingleStepWithRetry(
   }
 
   throw lastError || new Error(`Step execution failed after ${maxAttempts} attempts`);
+}
+
+// Structured Conditional Operator Evaluator
+function evaluateStructuredCondition(config: any, previousOutputs: Record<string, any>): Record<string, any> {
+  const fieldPath: string = config.field || 'output.status';
+  const operator: ConditionOperator = config.operator || 'equals';
+  const expectedValue: any = config.value !== undefined ? config.value : 200;
+
+  // Resolve field value from previous outputs
+  let actualValue: any = undefined;
+  if (fieldPath.startsWith('output.status')) {
+    actualValue = previousOutputs['http_request']?.status ?? 200;
+  } else if (fieldPath.startsWith('output.text')) {
+    actualValue = previousOutputs['llm_call']?.text ?? '';
+  } else {
+    actualValue = previousOutputs['http_request']?.status ?? 200;
+  }
+
+  let passed = false;
+  switch (operator) {
+    case 'equals':
+      passed = String(actualValue) === String(expectedValue);
+      break;
+    case 'not_equals':
+      passed = String(actualValue) !== String(expectedValue);
+      break;
+    case 'contains':
+      passed = String(actualValue).toLowerCase().includes(String(expectedValue).toLowerCase());
+      break;
+    case 'not_contains':
+      passed = !String(actualValue).toLowerCase().includes(String(expectedValue).toLowerCase());
+      break;
+    case 'greater_than':
+      passed = Number(actualValue) > Number(expectedValue);
+      break;
+    case 'less_than':
+      passed = Number(actualValue) < Number(expectedValue);
+      break;
+  }
+
+  return {
+    field_evaluated: fieldPath,
+    operator,
+    actual_value: actualValue,
+    target_value: expectedValue,
+    passed,
+    branch_taken: passed ? 'TRUE_PATH' : 'FALSE_PATH',
+  };
 }
 
 async function queryExec(db: any, text: string, params: any[] = []): Promise<any> {
